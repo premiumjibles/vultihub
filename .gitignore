@@ -1,0 +1,9 @@
+# Sub-repositories — don't track these
+vultisig-windows/
+vultisig-sdk/
+vultisig-android/
+vultisig-ios/
+station/
+
+# Claude memory (local only)
+.claude/
