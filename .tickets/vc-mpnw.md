@@ -164,6 +164,8 @@ The SDK should either:
 - [ ] `balancesWithPrices()` gracefully handles non-EVM token pricing (returns null/0 instead of throwing)
 - [ ] Swap quote provider selection rejects near-zero output amounts, or tries alternative providers
 - [ ] Solana outbound signing works reliably (currently 0% success rate — large tx payloads ~500+ bytes cause consistent MPC timeouts)
+- [ ] Solana blockhash refresh on retry — when MPC signing times out and retries, the Solana blockhash in the keysign payload may have expired, causing broadcast failure even after successful retry signing
+- [ ] Overall MPC first-attempt success rate improved (currently ~33% across 2 rounds of testing, ~30 signing attempts)
 
 ## Notes
 
