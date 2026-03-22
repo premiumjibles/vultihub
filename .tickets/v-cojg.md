@@ -1,6 +1,6 @@
 ---
 id: v-cojg
-status: open
+status: closed
 deps: []
 links: []
 created: 2026-03-22T10:24:46Z
@@ -48,12 +48,12 @@ Actually, looking more carefully: the issue is that `tokens --discover` without 
 
 ## Acceptance Criteria
 
-- [ ] `vasig chains --add-all` preserves all previously-active chains (including extra chains from config)
-- [ ] After `--add-all`, active count equals `SUPPORTED_CHAINS.length` (currently 36)
-- [ ] `vasig tokens --discover` does not modify `extraChains` in config
-- [ ] `vasig balance --include-tokens` auto-discover does not modify `extraChains` in config
-- [ ] Multiple discover/clear cycles leave `extraChains` unchanged
-- [ ] Lint and type-check pass
+- [x] `vasig chains --add-all` preserves all previously-active chains (including extra chains from config)
+- [x] After `--add-all`, active count equals `SUPPORTED_CHAINS.length` (currently 36)
+- [x] `vasig tokens --discover` does not modify `extraChains` in config (confirmed: SDK discoverTokens/addToken don't mutate chain state)
+- [x] `vasig balance --include-tokens` auto-discover does not modify `extraChains` in config (confirmed: no persistExtraChains calls in balance.ts)
+- [x] Multiple discover/clear cycles leave `extraChains` unchanged
+- [x] Lint and type-check pass
 
 ## Gotchas
 
