@@ -115,6 +115,43 @@ The vultiagent-cli currently works around Issue 1 with `signWithRetry()` — 1 r
 
 There is no workaround for Issue 2 without patching the SDK.
 
+## Issue 3: `balancesWithPrices()` Throws for Non-EVM Token Pricing
+
+### Observed Behavior
+
+`vault.balancesWithPrices(chains, includeTokens, 'usd')` throws `"Token pricing not supported for Solana (non-EVM chain)"` when the vault has discovered SPL tokens (e.g., PUMP on Solana). The error is non-deterministic — sometimes it throws, sometimes it silently drops the unpriceable tokens and returns the rest.
+
+### Impact
+
+CLI's `vasig balance --include-tokens --fiat` crashes intermittently. The CLI cannot reliably show fiat values for all assets when tokens are included.
+
+### Expected Behavior
+
+Should never throw for unsupported token pricing. Instead, return the token with `fiatValue: null` or `fiatValue: 0` and let the consumer decide how to handle it.
+
+## Issue 4: Swap Quote Providers Return Near-Zero Output Amounts
+
+### Observed Behavior
+
+Several swap routes via thorchain/mayachain providers return estimates that are essentially zero (10^-12 or less) but the SDK returns them as valid quotes:
+
+- `Ethereum → Arbitrum` (0.01 ETH): estimatedOutput = `0.00000000000098376 ETH` ($0.00) via mayachain
+- `Ethereum → BSC` (0.01 ETH): estimatedOutput = `0.000000000003242353 BNB` ($0.00) via thorchain
+- `Bitcoin → Ethereum` (0.00001 BTC): estimatedOutput = `0.000000000000020819 ETH` ($0.00) via thorchain
+
+The same routes work correctly via li.fi (returning reasonable amounts).
+
+### Impact
+
+If an agent executes a swap based on these quotes, it loses essentially all funds. The CLI returns `ok: true` for these quotes because the SDK doesn't validate output reasonableness.
+
+### Expected Behavior
+
+The SDK should either:
+1. Try multiple providers and return the best quote
+2. Reject quotes where output value is near-zero relative to input value
+3. Flag the quote with a warning when output/input ratio is extremely unfavorable
+
 ## Acceptance Criteria
 
 - [ ] First `vault.sign()` call in a fresh session succeeds reliably (no timeout on cold start)
@@ -123,3 +160,7 @@ There is no workaround for Issue 2 without patching the SDK.
 - [ ] Console logging during signing is suppressible (via option, log level, or removal)
 - [ ] `signingProgress` events are the primary progress mechanism, not console output
 - [ ] ERC-20 approve + swap flow doesn't produce stale server sessions with `autoApprove: false`
+- [ ] `getSupportedSwapChains()` returns deduplicated chain list (currently returns duplicates from multiple providers)
+- [ ] `balancesWithPrices()` gracefully handles non-EVM token pricing (returns null/0 instead of throwing)
+- [ ] Swap quote provider selection rejects near-zero output amounts, or tries alternative providers
+- [ ] Solana outbound signing works reliably (currently 0% success rate — large tx payloads ~500+ bytes cause consistent MPC timeouts)
