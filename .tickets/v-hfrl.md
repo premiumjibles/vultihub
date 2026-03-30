@@ -121,6 +121,84 @@ Added an `MpcProvider` interface + `configureMpc()` DI pattern to the SDK, wrapp
 - **Full vultiagent-app migration to SDK**: MEDIUM — chain registry + TX building are trivial (zero RN deps in `src/lib/`), but MPC keygen + the expo-dkls handle-based API vs WASM class-based API needs careful adapter work
 - **Native MpcProvider for expo-dkls**: MEDIUM — the conceptual API maps well (setup/output/input/finish), but expo-dkls uses integer handles vs WASM objects, and all messages are base64 strings vs Uint8Array. Adapter is straightforward but needs testing with real native module.
 
+## Goal State: Unified Rust → All Targets (Phase 2)
+
+### Current binary landscape
+
+Two separate codebases implement the same DKLS/Schnorr MPC protocol:
+
+| Source | Language | Build tool | Output | Used by |
+|---|---|---|---|---|
+| `vultisig/dkls23-rs` | Rust | `wasm-pack build -t web` | `.wasm` + `.js` + `.d.ts` | SDK (Node/browser) |
+| `vultisig/multi-party-schnorr` | Rust | `wasm-pack build -t web` | `.wasm` + `.js` + `.d.ts` | SDK (Node/browser) |
+| `vultisig/mobile-tss-lib` | Go | `gomobile bind` | `.xcframework` (iOS), `.aar` (Android) | vultiagent-app via expo-dkls |
+
+The Go repo is NOT calling into Rust — it's a completely independent Go implementation of the same protocol (built on `bnb-chain/tss-lib/v2`). The Rust and Go codebases are protocol-compatible but share zero source code.
+
+Native binaries (`.xcframework`, `.aar`) are git-ignored in vultiagent-app and must be manually copied from `mobile-tss-lib` builds — no download script exists.
+
+### Target state
+
+Bring the Rust source (`dkls23-rs`, `multi-party-schnorr`) into the SDK monorepo. One Rust codebase produces all three output targets. The Go repo (`mobile-tss-lib`) is eliminated.
+
+```
+sdk-repo/
+├── rust/
+│   ├── dkls/        # Rust DKLS source (from dkls23-rs)
+│   └── schnorr/     # Rust Schnorr source (from multi-party-schnorr)
+├── packages/
+│   ├── lib-dkls/    # Compiled outputs consumed by TS
+│   └── lib-schnorr/
+└── scripts/
+    └── build-native.sh
+```
+
+Build pipeline:
+
+```bash
+# WASM (Node/browser) — already working today
+wasm-pack build -t web --out-dir packages/lib-dkls/wasm
+
+# Android native (.so for arm64, armv7, x86_64 → packaged as .aar)
+cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 build --release
+
+# iOS native (device + simulator → .xcframework)
+cargo build --release --target aarch64-apple-ios
+cargo build --release --target aarch64-apple-ios-sim
+xcodebuild -create-xcframework ...
+```
+
+Triggered by `pnpm run build:wasm` and `pnpm run build:native`, or a CI pipeline. Most developers never run these — compiled outputs stay checked in (or published as release artifacts).
+
+### What this eliminates
+
+- The Go `mobile-tss-lib` repo and its gomobile build chain
+- The `sync-and-copy.ts` script that mirrors WASM from vultisig-windows
+- The manual process of copying `.xcframework` / `.aar` into expo-dkls
+- Two independent implementations of the same protocol diverging over time
+
+### What changes in expo-dkls
+
+The Swift and Kotlin wrappers would need updating to call Rust C FFI (via `cbindgen` or `uniffi-rs`) instead of Go FFI. The interface shape is similar — both are C-level function calls with buffer pointers. The TypeScript API (`ExpoDklsModule.ts`) stays the same.
+
+### Tooling maturity
+
+All three compilation targets from Rust are well-established:
+
+| Target | Tooling | Used in production by |
+|---|---|---|
+| WASM | `wasm-pack` | Already working in Vultisig today |
+| Android | `cargo-ndk` | Signal, Mozilla Application Services |
+| iOS | `cargo-lipo` + `cbindgen` / `uniffi-rs` | Signal, Mozilla Application Services, 1Password |
+
+### Rust source ownership
+
+Both `dkls23-rs` and `multi-party-schnorr` are Vultisig's own repos (not third-party). Licensed as "SLL" (Vultisig proprietary). `multi-party-schnorr` has a HashCloak security audit. No license concerns with bringing them in-repo.
+
+### Sequencing
+
+This is Phase 2 — depends on Phase 1 (pluggable MPC provider) being complete. The `MpcProvider` abstraction means the native provider swap (Go FFI → Rust FFI) is invisible to the TypeScript layer. Phase 1 buys the ability to do Phase 2 without touching any TS orchestration code.
+
 ## Open Questions
 
 - **MpcProvider interface shape**: The SDK's WASM classes use `new SignSession(setup, id, keyshare)` with `outputMessage()/inputMessage()/finish()`. expo-dkls uses flat functions (`dklsKeysignSetup()`, `dklsKeysignSession()`, `dklsKeysignOutbound()`, etc.). How thin should the adapter be? Should it mirror the WASM class API or define a higher-level interface?
