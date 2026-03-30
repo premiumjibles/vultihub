@@ -5,6 +5,8 @@ vultisig-android/
 vultisig-ios/
 station/
 vultiagent-cli/
+vultiserver/
+vultiagent-app/
 
 # Claude memory (local only)
 .claude/
