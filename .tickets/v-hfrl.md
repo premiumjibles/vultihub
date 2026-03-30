@@ -14,6 +14,8 @@ assignee: Jibles
 
 The Vultisig ecosystem has fragmented implementations across clients: vultiagent-app reimplements ~10k lines of chain/signing logic that exists in @vultisig/sdk, the MPC protocol has parallel Rust (WASM) and Go (native) implementations, and core packages are owned by vultisig-windows with a sync-and-copy pipeline to the SDK. "Solved" means one SDK monorepo that owns all business logic (TypeScript) and MPC cryptography (Rust source), compiling to every target. CLI, mobile app, and server are thin wrappers.
 
+**Fork target:** `premiumjibles` GitHub (forking `vultisig/vultisig-sdk`)
+
 ## Research Findings
 
 ### Current State
@@ -36,10 +38,17 @@ The Vultisig ecosystem has fragmented implementations across clients: vultiagent
 - `modules/expo-dkls/` — Expo native module wrapping Go gomobile binaries for DKLS (ECDSA) and Schnorr (EdDSA).
 - Code comments acknowledge duplication: "Mirrors vultisig-sdk DKLS.processOutbound", "Reference: vultisig-sdk/packages/..."
 
-**Two separate DKLS implementations:**
-- **Rust** (`vultisig-windows/lib/dkls/`) → WASM via wasm-pack → used by SDK in Node/browser
-- **Go** (`vultisig/mobile-tss-lib`) → native via gomobile → used by vultiagent-app on iOS/Android
-- Both implement the same MPC protocol (`bnb-chain/tss-lib/v2` underneath), different source languages
+**Two separate DKLS implementations — different languages, same protocol:**
+- **Rust** (`vultisig/dkls23-rs`, `vultisig/multi-party-schnorr`) → WASM via wasm-pack → SDK (Node/browser)
+- **Go** (`vultisig/mobile-tss-lib`) → native via gomobile → vultiagent-app (iOS/Android)
+- Both implement the same MPC protocol (`bnb-chain/tss-lib/v2` underneath)
+- **vultiserver already runs Rust** — `go-wrappers` calls pre-compiled Rust `.so`/`.dylib` via CGO. Server crypto is Rust; Go is just FFI glue.
+- vultiagent-app's mobile path has an unnecessary Go layer: Rust → Go CGO → gomobile → .xcframework/.aar. Direct Rust → native would be smaller and simpler.
+
+**Three separate build/sync pipelines:**
+- `sync-and-copy.ts` mirrors core packages from vultisig-windows → vultisig-sdk
+- `mobile-tss-lib` produces gomobile binaries manually copied into vultiagent-app (git-ignored, no script)
+- `go-wrappers` links against pre-compiled Rust `.so` for vultiserver
 
 ### Available Tools & Patterns
 
@@ -49,120 +58,89 @@ The Vultisig ecosystem has fragmented implementations across clients: vultiagent
 - Rollup builds separate bundles: `index.node.esm.js`, `index.browser.js`, `index.react-native.js`, etc.
 - DI pattern via global context (`context/wasmRuntime.ts`) — callback-based registration
 
-**SDK MPC layer (where the coupling is):**
-- `core/mpc/lib/signSession.ts` — **directly imports** `@lib/dkls/vs_wasm` and `@lib/schnorr/vs_schnorr_wasm`
-- `core/mpc/lib/initialize.ts` — directly imports WASM init functions
-- `core/mpc/keysign/index.ts` — calls `makeSignSession()` which returns WASM session objects
-- The `SignSession` interface is implicit (duck-typed from WASM classes): `outputMessage()`, `inputMessage()`, `finish()`
+**wallet-core DI is complete — zero leaks:**
+- Audited all 65 files importing `@trustwallet/wallet-core`. Every one receives walletCore as a function parameter.
+- DI chain: `configureWasm()` → `wasmProvider.getWalletCore()` → passed to every function as parameter
+- Providing an alternative implementation (native instead of WASM) requires zero changes to business logic
 
-**expo-dkls native module API (`modules/expo-dkls/src/ExpoDklsModule.ts`):**
-- Exposes: keygen setup/session/messages, keysign setup/session/messages, Schnorr equivalents, key import
-- iOS: Swift wrapping `godkls.xcframework` + `goschnorr.xcframework` via C FFI
-- Android: Kotlin wrapping `dkls-release.aar` + `goschnorr-release.aar` via JNI/SWIG
-- Frameworks are pre-built binaries, not compiled from source in this repo
+**Protobuf types are pure JS — no WASM dependency:**
+- All `TW.*.Proto.*` types (signing inputs, outputs) come from `core_proto.js` — pure protobufjs-generated code
+- These work identically regardless of WASM vs native wallet-core runtime
+- This was the biggest perceived risk and it's a non-issue
 
-**vultiagent-cli as reference thin client:**
-- `src/lib/sdk.ts` — initializes SDK, imports vault, overlaps WASM compilation with file I/O
-- `src/lib/signing.ts` — retry wrapper around `vault.sign()`
-- `src/commands/` — each command calls high-level SDK methods (`vault.balance()`, `vault.prepareSendTx()`, etc.)
-- Total: ~2.5k LOC for a full-featured CLI with MCP support
+**TrustWallet publishes native wallet-core binaries:**
+- iOS: `.xcframework` via SPM/CocoaPods (~32 MB). Android: `.aar` via Maven (~54 MB)
+- MIT licensed, actively maintained, used by Trust Wallet's own mobile app
+- Native API is a superset of WASM API — same C++ core, same classes, same methods
+- Expo Modules API supports synchronous JSI functions — preserves exact call pattern SDK uses
+- ~15-20 wallet-core calls per transaction, sub-microsecond via JSI. Negligible.
 
-### Validated Behaviors
+**MPC provider pluggability proven (PoC):**
+- Added `MpcProvider` interface + `configureMpc()`. Only 3 core files modified.
+- All 336 SDK tests + 172 CLI tests pass. Keysign orchestration required zero changes.
+- expo-dkls and SDK WASM expose the same conceptual API (setup, outputMessage, inputMessage, finish)
 
-- Confirmed: SDK's `platforms/react-native/` entry point exists and builds, but the DKLS binding is still WASM (not native)
-- Confirmed: `signSession.ts` directly imports WASM classes — no abstraction point for native bindings
-- Confirmed: expo-dkls and SDK WASM expose the same conceptual API (setup, outputMessage, inputMessage, finish) — just different function signatures
-- Confirmed: vultiagent-app's `src/lib/` (chains, coins) has zero RN/Expo imports and could be dropped entirely in favor of SDK equivalents
-- Confirmed: SDK already has `MpcProvider`-like precedent in `WasmProvider` pattern and `configureCrypto()` DI
-- Confirmed: both repos use npm (package-lock.json), not pnpm/yarn
+**vultiagent-app chain coverage:**
+- 27 of 31 chains have full tx building in pure JS (@noble, @scure, manual protobuf)
+- Only UTXO (Bitcoin, Litecoin, Dogecoin, Bitcoin-Cash) missing
+- With native wallet-core, all 36+ SDK chains work including UTXO
+
+**Rust source is Vultisig-owned:**
+- `dkls23-rs` and `multi-party-schnorr` — Vultisig proprietary (SLL license)
+- `multi-party-schnorr` has HashCloak security audit
+- No third-party license concerns with bringing in-repo
+
+### Build Environment (verified on dev machine)
+
+| Tool | Status |
+|---|---|
+| Android SDK + emulator | `Medium_Phone_API_36.0` AVD ready |
+| adb | Installed |
+| Rust (stable, x86_64-linux-gnu) | Installed |
+| wasm-pack | **Not installed** (need `cargo install wasm-pack`) |
+| cbindgen | **Not installed** (need `cargo install cbindgen`) |
+| cargo-ndk | **Not installed** (need `cargo install cargo-ndk`) |
+| Android Rust targets | **Not installed** (need `rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android`) |
+| agent-device | **Not installed** (need `npx agent-device`) — mobile simulator automation CLI for AI agents |
+| iOS / macOS | **Not available** — Linux machine, iOS testing impossible locally |
+| Test vault (.vult + password) | Available in SDK .env |
+| Production backends | Available (agent.vultisig.com, verifier, relay, api) |
 
 ## Constraints
 
-- Expo-specific APIs (secure storage, biometrics, camera) are app-level concerns and stay in the app, not the SDK
-- SDK's `@core/mpc` and `@lib/dkls` packages are currently synced from vultisig-windows — forking the SDK means owning these directly
-- vultiserver is Go — it consumes MPC via CGO and must continue to. Changes to the Rust build must produce compatible `.so` + C headers
+- Expo-specific APIs (secure storage, biometrics, camera) stay in the app, not the SDK
+- vultiserver is Go — consumes MPC via CGO. Rust build must produce compatible `.so` + C headers
+- No macOS available — iOS native modules can only be written and structurally tested; actual iOS verification requires a Mac. Android is fully testable via emulator.
+- wallet-core native binary version must match WASM npm package version for behavioral parity
 
 ## Dead Ends
 
-- **Go → WASM for unified binary**: Go's WASM output bundles the entire Go runtime (~15-20 MB), no threads, poor performance vs Rust WASM. Not viable.
-- **Pure TypeScript MPC**: Elliptic curve MPC in JS would be orders of magnitude slower and a security risk. Must stay in a systems language.
-- **Extracting vultiagent-app into a second SDK**: Its service code is coupled to Expo. The existing SDK already has the platform abstraction it would need. No point building a second one.
-- **Pure JS shim for wallet-core on RN**: vultiagent-app covers 27/36 chains with @noble/@scure, but UTXO is missing and maintaining parity with wallet-core's behavior across 36+ chains is a permanent tax. Native wallet-core is the better path.
+- **Go → WASM**: Bundles entire Go runtime (~15-20 MB), no threads, poor performance. Not viable.
+- **Pure TypeScript MPC**: Orders of magnitude slower, security risk. Must stay in systems language.
+- **Second SDK from vultiagent-app code**: Coupled to Expo, would need the same platform abstraction the existing SDK already has.
+- **Pure JS wallet-core shim for RN**: 27/36 chains covered but UTXO missing, permanent maintenance tax. Native wallet-core gets all 36+ chains for free.
 
-## Validated Research
+## Goal Architecture
 
-### wallet-core DI is complete (2026-03-30)
-
-Audited all 65 files that import `@trustwallet/wallet-core`. Every single one receives walletCore as a function parameter — zero direct runtime imports in business logic. The DI chain:
-
-```
-Platform entry point: configureWasm(async () => initWalletCore())
-    → SdkContextBuilder: wasmProvider = { getWalletCore }
-        → Service classes: this.wasmProvider.getWalletCore()
-            → Pure functions: walletCore passed as parameter
-                → Chain resolvers, address derivation, TX compilation
-```
-
-This means providing an alternative wallet-core implementation (native instead of WASM) requires zero changes to business logic — just a different `configureWasm()` registration.
-
-### TrustWallet native wallet-core is viable for React Native (2026-03-30)
-
-**Key findings:**
-- wallet-core is a C++ library. WASM is the secondary target; native iOS/Android is primary. Trust Wallet's own mobile app uses the native version.
-- iOS: `.xcframework` via SPM/CocoaPods (~32 MB). Android: `.aar` via Maven (~54 MB). Both actively maintained, MIT licensed.
-- **Protobuf types (`TW.*.Proto.*`) are pure protobufjs-generated JavaScript** — zero WASM dependency. They work as-is regardless of WASM vs native runtime. This was the biggest risk and it's a non-issue.
-- Expo Modules API supports **synchronous JSI functions** — native wallet-core methods can be called synchronously from JS, preserving the exact call pattern the SDK uses (no async conversion).
-- A typical transaction involves ~15-20 wallet-core calls. With JSI, that's sub-microsecond per call. Negligible vs MPC ceremony and network RTTs.
-- Native wallet-core API is a **superset** of the WASM API — same C++ core, same classes, same methods.
-- No maintained RN bridge exists, but wrapping in an Expo module (like expo-dkls) is straightforward — ~15 classes/namespaces to expose.
-
-**What `expo-wallet-core` needs to expose:**
-- Static utilities: `CoinType`, `CoinTypeExt`, `HexCoding`, `TransactionCompiler`, `AnySigner`, `TransactionDecoder`, `Bech32`, `Curve`
-- Factory/instance classes (as JSI HostObjects): `HDWallet`, `PublicKey`, `AnyAddress`, `DataVector`, `BitcoinScript`, `EthereumAbi`/`EthereumAbiFunction`, `SolanaAddress`, `TONAddressConverter`, `PrivateKey`
-- NOT needed in native bridge: All `TW.*` protobuf types (pure JS, already works)
-
-### Pluggable MPC Provider proven (2026-03-30)
-
-Added `MpcProvider` interface + `configureMpc()` DI pattern. Only 3 core files modified. All 336 SDK tests + 172 CLI tests pass. Keysign orchestration (`keysign/index.ts`) required zero changes. See PoC details below.
-
-### vultiagent-app chain coverage (2026-03-30)
-
-The app has full tx building (address derivation + tx construction + signing) for **27 of 31 registry chains** using pure JS:
-- 13 EVM, 10 Cosmos, Solana, Sui, TON, Tron
-- Only UTXO missing (Bitcoin, Litecoin, Dogecoin, Bitcoin-Cash — explicitly stubbed)
-- Libraries: @noble/curves, @noble/hashes, @scure/bip32, @scure/bip39, @solana/web3.js, @ton/core, manual protobuf
-
-This validates that the SDK's chain logic runs fine without WASM wallet-core for most chains. But with native wallet-core, all 36+ chains work out of the box — including UTXO.
-
-## Final Goal Architecture
-
-### Two native dependencies, both pluggable via DI
-
-The SDK has exactly two binary dependencies that can't be pure TypeScript:
-
-1. **wallet-core** — address derivation, tx building, compilation (36+ chains)
-2. **DKLS/Schnorr** — MPC threshold signing
-
-Both are already injected via DI (`configureWasm()` / `configureMpc()`). Each platform provides the right implementation:
+### Two native dependencies, both pluggable via existing DI
 
 | Platform | wallet-core | MPC (DKLS/Schnorr) |
 |---|---|---|
 | **Node.js (CLI)** | WASM (`@trustwallet/wallet-core`) | WASM (`@lib/dkls`, `@lib/schnorr`) |
-| **Browser** | WASM | WASM |
-| **Electron** | WASM | WASM |
-| **React Native** | Native via `expo-wallet-core` | Native via `expo-dkls` |
-| **vultiserver** | N/A (server doesn't build txs) | Rust `.so` via Go CGO |
+| **Browser / Electron** | WASM | WASM |
+| **React Native** | Native via `expo-wallet-core` | Native via `expo-dkls` (Rust → native, no Go) |
+| **vultiserver** | N/A | Rust `.so` via Go CGO |
 
 ### Target monorepo structure
 
 ```
-@vultisig/sdk (pnpm monorepo — source of truth for all clients)
+@vultisig/sdk (pnpm monorepo — premiumjibles fork)
 ├── rust/
-│   ├── dkls/              # Rust DKLS source (from dkls23-rs)
-│   ├── schnorr/           # Rust Schnorr source (from multi-party-schnorr)
-│   └── Cargo.toml         # Workspace — builds WASM, iOS, Android, server targets
+│   ├── dkls/              # Rust DKLS source (from vultisig/dkls23-rs)
+│   ├── schnorr/           # Rust Schnorr source (from vultisig/multi-party-schnorr)
+│   └── Cargo.toml         # Workspace — WASM, Android, server targets (iOS needs Mac CI)
 ├── packages/
-│   ├── core-chain/        # Chain implementations (from vultisig-windows, now owned)
+│   ├── core-chain/        # Chain implementations (owned, no longer synced)
 │   ├── core-mpc/          # MPC orchestration (TS — keysign, keygen, relay, messaging)
 │   ├── core-config/       # Chain metadata
 │   ├── lib-dkls/          # DKLS WASM output + TS types
@@ -175,122 +153,193 @@ Both are already injected via DI (`configureWasm()` / `configureMpc()`). Each pl
 │   │       ├── react-native/  # expo-wallet-core + expo-dkls
 │   │       └── electron/      # WASM wallet-core + WASM MPC
 │   ├── expo-wallet-core/  # Expo module wrapping TrustWallet native binaries
-│   └── expo-dkls/         # Expo module wrapping Rust MPC native binaries (moved from app)
+│   └── expo-dkls/         # Expo module wrapping Rust MPC native binaries
 ├── apps/
 │   └── cli/               # vultiagent-cli (thin wrapper)
 └── pnpm-workspace.yaml
 ```
 
-vultiagent-app stays as a separate repo but becomes a thin React Native shell importing `@vultisig/sdk/react-native`.
-
 ### MPC Rust build pipeline — one source, four targets
 
 ```bash
-# 1. WASM (Node/browser/Electron)
+# WASM (Node/browser/Electron)
 wasm-pack build -t web --out-dir packages/lib-dkls/wasm
 
-# 2. iOS native (.xcframework for expo-dkls)
-cargo build --release --target aarch64-apple-ios
-cargo build --release --target aarch64-apple-ios-sim
-xcodebuild -create-xcframework ...
-
-# 3. Android native (.so → .aar for expo-dkls)
+# Android native (.so for expo-dkls)
 cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 build --release
 
-# 4. Server native (.so + C headers for vultiserver CGO)
+# Server native (.so + C headers for vultiserver CGO)
 cargo build --release --target x86_64-unknown-linux-gnu
 cbindgen --config cbindgen.toml --output include/dkls.h
+
+# iOS native (.xcframework — requires Mac CI, not buildable locally)
+# cargo build --release --target aarch64-apple-ios
+# cargo build --release --target aarch64-apple-ios-sim
+# xcodebuild -create-xcframework ...
 ```
 
-### Current binary landscape (what we're cleaning up)
+### What gets eliminated
 
-| Source | Language | Output | Consumer | Status after unification |
-|---|---|---|---|---|
-| `vultisig/dkls23-rs` | Rust | WASM | SDK (Node/browser) | Moved into our repo |
-| `vultisig/multi-party-schnorr` | Rust | WASM | SDK (Node/browser) | Moved into our repo |
-| `vultisig/mobile-tss-lib` | Go | .xcframework/.aar | vultiagent-app | **Eliminated** — Rust compiles to native directly |
-| `vultisig/go-wrappers` | Go (CGO) | Go package | vultiserver | Consumes our `.so` + headers instead |
-| `@trustwallet/wallet-core` | C++ | WASM npm package | SDK (all platforms) | Stays for WASM platforms |
-| TrustWallet native | C++ | .xcframework/.aar | Trust Wallet app | Wrapped in `expo-wallet-core` for RN |
-| vultisig-windows `sync-and-copy` | — | — | SDK packages | **Eliminated** — we own the source |
+- `mobile-tss-lib` Go repo — replaced by Rust → native directly
+- `go-wrappers` build chain — consumes our `.so` + headers instead of owning Rust compilation
+- `sync-and-copy.ts` — we own the core packages
+- Manual binary copying into expo-dkls — build pipeline produces them
+- ~10k LOC of reimplemented logic in vultiagent-app
+- Go runtime overhead in mobile binaries (~9.6 MB per platform)
+- Two independent implementations of the same MPC protocol
 
-### What each consumer looks like after unification
+## Implementation Plan
 
-**vultiagent-cli** (already close to this):
-```typescript
-import { Vultisig } from '@vultisig/sdk/node'
-const sdk = new Vultisig()
-const vault = await sdk.importVault(vaultFile, password)
-await vault.sign(payload)
-```
+### 1. Foundation — fork, restructure, verify (2-3 days)
 
-**vultiagent-app** (currently reimplements everything, becomes thin):
-```typescript
-// platforms/react-native/index.ts registers:
-// - expo-wallet-core as wallet-core provider
-// - expo-dkls as MPC provider
-import { Vultisig } from '@vultisig/sdk/react-native'
-const sdk = new Vultisig()
-// Same API as CLI — address derivation, tx building, signing all work
-```
+**Work:**
+- Fork `vultisig/vultisig-sdk` to `premiumjibles`
+- Convert from yarn to pnpm (see v-mehr)
+- Delete `scripts/sync-and-copy.ts`, promote synced packages to first-class workspace packages
+- Rename workspace packages (`@core/chain` → `core-chain`, etc.) with proper `package.json` names
+- Update all import paths and TypeScript path aliases
+- Update Rollup build config for pnpm workspace resolution
 
-**vultiserver** (minimal change):
-- Continues using Go + CGO
-- `mpc_wrapper.go` unchanged — same C FFI function signatures
-- `.so` + C headers come from our Rust build instead of go-wrappers
+**Verification:**
+- `pnpm install` succeeds
+- `tsc --noEmit` passes across all packages
+- All 336 SDK unit tests pass
+- All 172 CLI tests pass
+- All 5 platform bundles build (node, browser, electron, chrome-extension, react-native)
+- CLI can import vault from `.vult` file and run `vault.address()` against live backend
 
-## Phased Implementation
+### 2. Pluggable MPC provider — production-ready (1-2 days)
 
-### Phase 1: SDK pluggability + expo-wallet-core (unblocks RN adoption)
+**Work:**
+- Productionize the PoC `MpcProvider` interface + `configureMpc()` pattern
+- Add `MpcKeygenProvider` interface for keygen flows (same pattern)
+- Move provider abstraction to `packages/sdk/src/mpc/` (not `packages/core/` since core was synced)
+- Register `wasmMpcProvider` in all platform entry points
+- Write adapter: `NativeMpcProvider` implementing `MpcProvider` using expo-dkls handle API
 
-1. **Fork SDK, own core packages** — remove sync-and-copy dependency on vultisig-windows
-2. **`expo-wallet-core` Expo module** — wrap TrustWallet native iOS/Android binaries, expose ~15 classes via JSI synchronous calls. Register via `configureWasm()` in `platforms/react-native/`
-3. **`MpcProvider` abstraction** (PoC complete) — production-ready the pluggable MPC interface. Register expo-dkls as the native provider in `platforms/react-native/`
-4. **Move `expo-dkls` into SDK monorepo** — becomes `packages/expo-dkls/`
-5. **Migrate vultiagent-app** — replace reimplemented services with `@vultisig/sdk/react-native` imports. App becomes UI + Expo-specific features only.
+**Verification:**
+- All existing SDK + CLI tests still pass (regression)
+- New unit test: `MpcProvider` interface with mock provider → keysign flow runs, returns expected signature shape
+- TypeCheck passes
 
-**Result:** CLI and mobile app both consume the same SDK. Two native Expo modules provide platform-specific bindings. All business logic shared.
+### 3. expo-wallet-core — native wallet-core for React Native (5-8 days)
 
-### Phase 2: Unified Rust MPC build (eliminates Go dependency)
+**Work:**
+- Create Expo module `packages/expo-wallet-core/`
+- Kotlin implementation (Android): wrap TrustWallet `.aar` via JNI, expose ~15 classes as JSI synchronous functions
+- Swift implementation (iOS): wrap TrustWallet `.xcframework` via native calls, expose same ~15 classes
+- TypeScript interface (`ExpoWalletCoreModule.ts`) matching the duck-typed interface the SDK expects from `initWasm()`
+- Classes to expose: `CoinType`, `CoinTypeExt`, `HDWallet`, `PublicKey`, `PublicKeyType`, `AnyAddress`, `TransactionCompiler`, `AnySigner`, `DataVector`, `HexCoding`, `BitcoinScript`, `EthereumAbi`, `EthereumAbiFunction`, `SolanaAddress`, `TONAddressConverter`, `PrivateKey`, `Curve`, `Bech32`, `TransactionDecoder`
+- JSI HostObjects for stateful classes (HDWallet, DataVector, PublicKey, AnyAddress, BitcoinScript) with proper lifecycle (`delete()` methods)
 
-1. **Bring Rust source into repo** — `dkls23-rs` and `multi-party-schnorr` into `rust/`
-2. **Verify WASM builds match** — ensure `wasm-pack` output is identical to existing binaries
-3. **Add server `.so` + C header build** — verify go-wrappers/vultiserver compatibility
-4. **Add iOS/Android native builds** — `cargo-ndk` + `uniffi-rs`/`cbindgen`
-5. **Update expo-dkls wrappers** — Swift/Kotlin call Rust C FFI directly instead of Go FFI
-6. **Deprecate mobile-tss-lib and go-wrappers**
+**Verification — Node.js cross-validation (no simulator needed):**
+- Build a `MockWalletCore` using @noble/curves + @scure/bip32 that implements the same interface
+- Run SDK unit tests through mock provider via `configureWasm()`
+- Cross-validate: run same operations through WASM and mock, compare outputs byte-for-byte
+- This proves the DI works and the interface shape is correct
 
-**Result:** One Rust codebase → WASM + iOS + Android + server. No Go MPC dependencies. Smaller mobile binaries (no Go runtime overhead).
+**Verification — Android emulator (closes the native loop):**
+- Boot `Medium_Phone_API_36.0` emulator headlessly (`emulator -no-window -avd Medium_Phone_API_36.0`)
+- Build minimal Expo test app that imports expo-wallet-core and runs: address derivation, tx building, signing input encoding
+- `npx expo run:android` to build + install
+- Use `agent-device` to verify app launches and displays correct addresses
+- `adb logcat` to catch native crashes, iterate until clean
+- Cross-validate: compare addresses/signing inputs from emulator vs Node.js WASM — must match
 
-## PoC Results: Pluggable MPC Provider (2026-03-30)
+### 4. Bring Rust source + build WASM and native (3-5 days)
 
-### What was done
-Added an `MpcProvider` interface + `configureMpc()` DI pattern to the SDK, wrapping all WASM imports behind a pluggable provider. The existing WASM path works identically through the new abstraction.
+**Work:**
+- Clone `vultisig/dkls23-rs` and `vultisig/multi-party-schnorr` into `rust/`
+- Set up Cargo workspace
+- Install missing tools: `cargo install wasm-pack cbindgen cargo-ndk`, add Android Rust targets
+- WASM build: `wasm-pack build -t web`, diff output against existing committed binaries
+- Android native build: `cargo ndk` for arm64, armv7, x86_64
+- Server native build: `cargo build --release` + `cbindgen` for C headers
+- iOS native build scripts (written but not runnable locally — needs Mac CI)
 
-### Files changed (SDK)
-- **NEW** `packages/core/mpc/lib/mpcProvider.ts` — interface + registry (55 LOC)
-- **NEW** `packages/core/mpc/lib/wasmMpcProvider.ts` — WASM implementation (63 LOC)
-- **MODIFIED** `packages/core/mpc/lib/initialize.ts` — delegates to provider (was 18 LOC, now 13)
-- **MODIFIED** `packages/core/mpc/lib/keyshare.ts` — delegates to provider (was 22 LOC, now 15)
-- **MODIFIED** `packages/core/mpc/lib/signSession.ts` — delegates to provider (was 35 LOC, now 55)
-- **MODIFIED** 4 platform entry points + 2 test setups — 2-line addition each (`configureMpc(wasmMpcProvider)`)
-- **UNCHANGED** `keysign/index.ts`, `keysign/setupMessage/make.ts` — zero modifications needed
+**Verification:**
+- `cargo test` passes on all Rust crates
+- WASM output byte-identical to existing committed binaries (or functionally equivalent — verify by running SDK tests with new WASM)
+- Server `.so` + C headers ABI-compatible with go-wrappers (diff generated headers against existing)
+- Android `.so` files produced for all 3 architectures
 
-### Test results
-- TypeScript typecheck: PASS
-- SDK unit tests: 336/336 passed (21 files)
-- CLI tests: 172/172 passed (22 files)
-- SDK build (node): PASS
+### 5. expo-dkls — Rust native MPC for React Native (3-5 days)
 
-### Key findings
-1. **Clean abstraction**: Only 3 files needed modification in core MPC. Keysign orchestration required zero changes.
-2. **Schnorr type difference**: DKLS `setup()` takes nullable messageHash, Schnorr takes non-nullable. Provider interface uses nullable, WASM provider asserts non-null for Schnorr.
-3. **Keygen not covered**: `dkls/dkls.ts` and `schnorr/schnorrKeygen.ts` still import WASM directly. Would need `MpcKeygenProvider`. Fine for now — vultiagent-app creates vaults via server.
+**Work:**
+- Move `vultiagent-app/modules/expo-dkls/` into `packages/expo-dkls/`
+- Update Kotlin wrapper: replace Go JNI calls (`godkls.*`) with Rust JNI calls (link against `.so` from step 4)
+- Update Swift wrapper: replace Go C FFI calls with Rust C FFI calls (link against Rust output)
+- Update podspec and build.gradle to reference new binary sources
+- Wire `NativeMpcProvider` adapter (from step 2) to use updated expo-dkls
+
+**Verification — Android emulator:**
+- Build test app with expo-dkls using Rust native binaries
+- Run on emulator, execute MPC keysign against production relay/VultiServer using test vault
+- Verify signature matches what CLI produces for same payload (cross-platform parity)
+- `agent-device` to automate the flow, `adb logcat` for crash debugging
+
+### 6. Wire platforms/react-native + migrate app (3-5 days)
+
+**Work:**
+- Update `platforms/react-native/index.ts`:
+  - `configureWasm()` → registers expo-wallet-core
+  - `configureMpc()` → registers expo-dkls native provider
+  - Configure RN-specific polyfills (crypto.getRandomValues, fetch)
+- Migrate vultiagent-app:
+  - Replace `src/services/evmTx.ts`, `cosmosTx.ts`, `solanaTx.ts`, etc. with SDK `vault.prepareSendTx()` + `vault.sign()`
+  - Replace `src/lib/chains.ts`, `src/lib/coins.ts` with SDK chain registry
+  - Replace `src/services/auth/`, `src/services/relay.ts` with SDK signing services
+  - Keep: all UI, Expo-specific features (biometrics, secure store, camera, speech), navigation, state, scheduling, agent chat
+- Update vultiagent-app's `package.json` to depend on `@vultisig/sdk` (file reference to monorepo or published package)
+
+**Verification — full end-to-end on Android emulator:**
+- `npx expo run:android` with migrated app
+- Use `agent-device` to:
+  - Launch app, verify it loads
+  - Import vault (using test .vult file)
+  - Navigate to balances, verify chain balances display
+  - Initiate a send, verify TX building succeeds
+  - Execute MPC signing against production relay/VultiServer
+  - Verify transaction broadcasts (or at least signing completes)
+- Compare: same vault, same operation via CLI vs mobile app — results must match
+- Run vultiagent-app's existing Detox E2E suite (may need Android config — currently iOS only)
+
+### 7. CI pipeline + cleanup (1-2 days)
+
+**Work:**
+- GitHub Actions workflow: typecheck, lint, unit tests, SDK build (all platforms)
+- Rust CI: `cargo test`, `wasm-pack build`, `cargo-ndk build`
+- Document: how to add a new chain, how to update wallet-core version, how to rebuild Rust binaries
+- Remove: all deleted reimplemented code from vultiagent-app, unused dependencies
+
+**Verification:**
+- CI green on all checks
+- CLI tests pass in CI
+- WASM builds reproducible in CI
+
+## Testing Strategy Summary
+
+| Layer | Method | Automated? |
+|---|---|---|
+| TypeScript correctness | `tsc --noEmit` across all packages | Yes — CI |
+| SDK unit tests (336) | Jest with WASM providers | Yes — CI |
+| CLI tests (172) | Jest with WASM providers | Yes — CI |
+| DI verification | Mock wallet-core + mock MPC provider pass full test suite | Yes — CI |
+| Cross-platform parity | Same operations through WASM vs mock, byte-for-byte diff | Yes — CI |
+| Rust crates | `cargo test` | Yes — CI |
+| WASM build verification | Diff against existing binaries | Yes — CI |
+| Android native wallet-core | expo-wallet-core on emulator via `agent-device` | Yes — local |
+| Android native MPC | expo-dkls (Rust) on emulator, real signing against prod | Yes — local |
+| Full app E2E | Migrated vultiagent-app on emulator via `agent-device` | Yes — local |
+| Real MPC signing | Test vault + production relay/VultiServer | Yes — local (same as CLI) |
+| iOS native modules | Swift code written, structurally matches Kotlin | **No — needs Mac** |
+| Server .so compatibility | Diff C headers against go-wrappers | Yes — CI |
+
+**Key insight:** Everything except iOS can be tested autonomously. The CLI already hits production backends with the test vault — the mobile app will do the same thing through the same SDK, just with native providers instead of WASM.
 
 ## Open Questions
 
-- **expo-wallet-core scope**: Should it expose the full wallet-core API or only the ~15 classes the SDK actually uses? Minimal surface = less bridge code, but limits future SDK features.
-- **Migration strategy for vultiagent-app**: Incremental (chain registry first, then TX building, then MPC) vs big bang? The DI architecture suggests incremental is safe — each layer can be swapped independently.
-- **Monorepo structure**: Should vultiagent-app live inside the SDK monorepo (as `apps/mobile/`) or stay as a separate repo consuming published SDK packages?
-- **Testing parity**: How do we verify native wallet-core + native MPC produces identical results to WASM + WASM? Need cross-platform integration tests.
-- **wallet-core version pinning**: The native iOS/Android binaries must match the WASM npm package version exactly. How do we enforce this?
+- **expo-wallet-core scope**: Minimal (~15 classes the SDK uses) vs full wallet-core API? Recommend minimal — less bridge code, add more later if needed.
+- **Monorepo vs separate repo for vultiagent-app**: Recommend separate repo consuming published SDK — keeps the SDK focused and the app's Expo/RN concerns separate.
+- **wallet-core version pinning**: Native binaries must match WASM npm version. Enforce via CI check that compares versions in expo-wallet-core podspec/gradle against `@trustwallet/wallet-core` in SDK package.json.
+- **iOS CI**: Need a Mac runner (GitHub Actions has macOS runners) for iOS xcframework builds and expo-wallet-core iOS testing.
