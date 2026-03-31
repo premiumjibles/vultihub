@@ -202,18 +202,16 @@ First pass based on the roadmap. Each mission is roughly 1-2 weeks of appetite.
 
 | Mission | Domains | Appetite |
 |---------|---------|----------|
-| **Unify EVM chain logic into SDK**, consolidate all EVM transaction building (send, swap, approve) into one SDK implementation. App, CLI, and backend all call the same functions. | SDK Core | 2 weeks |
-| **Unify Cosmos chain logic into SDK**, same as above for Cosmos family (ATOM, OSMO, etc). Send, stake, IBC transfers. | SDK Core | 2 weeks |
-| **Unify Solana/SVM chain logic into SDK**, Solana transaction building, token accounts, SPL transfers. | SDK Core | 2 weeks |
+| **Unify all chain logic into SDK**, consolidate all transaction building (EVM, Cosmos, Solana, Sui, TON, Tron, UTXO) into one SDK implementation. App, CLI, and backend all call the same functions. UTXO requires native wallet-core bindings. | SDK Core | 2 weeks |
 | **Stabilize agent backend**, audit and fix conversation flow, tool call failures, context dropping. Clear error messages. | Agent Backend | 2 weeks |
-| **Station hype/migration screen**, ship the initial Station presence. Hype screen, migration messaging, LUNA/LUNC token support for airdrop holders. | Client Surfaces | 1 week |
+| **Station hype/migration screen**, ship the initial Station presence. Hype screen, migration messaging, LUNA/LUNC token support for airdrop holders. | Client Surfaces | 1 day |
 | **MCP/CLI reliability pass**, fix failing tool calls, stabilize balance/send/swap commands, consistent error handling. | External Access | 2 weeks |
 
 ### Cycle 2 (Weeks 3-4)
 
 | Mission | Domains | Appetite |
 |---------|---------|----------|
-| **Unify remaining chains into SDK**, Sui, TON, Tron, UTXO (Bitcoin, LTC, DOGE, BCH). UTXO requires native wallet-core bindings. | SDK Core | 2 weeks |
+| **UTXO chain support**, add Bitcoin, Litecoin, Dogecoin, Bitcoin Cash support via native wallet-core bindings across all surfaces. | SDK Core | 1 week |
 | **Signing orchestration in SDK**, migrate signing flow into SDK so all products use the same path. Fast vault signing works end-to-end. | SDK Core | 2 weeks |
 | **Station full wallet launch**, vault management, balances, send/receive, swaps. Must feel complete, not beta. Only ship when ready. | Client Surfaces | 2 weeks |
 | **SDK capability expansion**, token info lookups, transaction history, portfolio analytics. Available across all surfaces via SDK. | SDK Core, External Access | 2 weeks |
