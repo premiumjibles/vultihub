@@ -250,7 +250,5 @@ First pass based on the roadmap. Each mission is roughly 1-2 weeks of appetite.
 Things to discuss as a team:
 
 1. **Primary/secondary domain assignments**, who wants what?
-2. **Monorepo vs multi-repo long-term**, hub repo works for now, but should we consolidate eventually?
-3. **Discord channel structure**, do we want `#team-pulse`, `#architecture`, or just one channel?
-4. **Biome config details**, any strong opinions on specific rules?
-5. **Mission sizing**, are these roughly right or should some be split/combined?
+2. **Mission sizing**, are these roughly right or should some be split/combined?
+3. **Repo consolidation**, should we merge some repos? E.g. agent-backend into vultiagent-app as a monorepo. Less context switching, shared types, one CI. Tradeoff is a bigger repo and mixed languages (Go + TS).
