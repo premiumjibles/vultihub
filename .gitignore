@@ -8,5 +8,6 @@ vultiagent-cli/
 vultiserver/
 vultiagent-app/
 
-# Claude memory (local only)
-.claude/
+# Claude local config (memory, settings)
+.claude/*
+!.claude/skills/
