@@ -1,5 +1,5 @@
 ---
-name: daily-digest
+name: discord-digest
 description: >
   Generates a daily engineering activity digest across all Vultisig repos
   and posts it to Discord via webhook. Surfaces per-engineer commits, PRs,
